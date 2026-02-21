@@ -22,3 +22,6 @@ tqdm==4.66.4
 # Phase 2: Feature Engineering & Connectivity
 ewtpy
 mne-connectivity==0.7.0
+
+# Phase 2: COmBat Harmonization
+neuroCombat==0.2.12

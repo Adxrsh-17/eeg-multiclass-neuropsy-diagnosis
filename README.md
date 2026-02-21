@@ -13,7 +13,8 @@
 flowchart TD
     A[Phase 0: Data Ingestion & Unification ✅] --> B[Phase 1: Harmonization & Preprocessing ✅]
     B --> C[Phase 2: Feature Engineering & Graph Construction ⏳]
-    C --> D[Phase 3: GNN Modeling & Training ⏳]
+    C --> C2[Phase 2b: COmBat Batch-Effect Harmonization ⏳]
+    C2 --> D[Phase 3: GNN Modeling & Training ⏳]
     D --> E[Phase 4: Evaluation & Explainability ⏳]
 ```
 
@@ -61,12 +62,46 @@ The project is structured into several phases. ✅ indicates **completed**, ⏳ 
 ---
 
 ### ⏳ Phase 2: Feature Engineering & Graph Construction  
-**Concept**: Transform clean EEG epochs into a **graph format** suitable for GNNs.  
+**Concept**: Transform clean EEG epochs into a **graph format** suitable for GNNs, then correct for inter-dataset recording differences.
 
 **Planned Implementation**:  
 - **Nodes**: 19 EEG channels.  
 - **Node Features**: Extracted via **Empirical Wavelet Transform (EWT)** across EEG bands (Delta, Theta, Alpha, Beta, Gamma). Features include **spectral power** and **Shannon entropy**.  
-- **Edges**: Functional connectivity via **Weighted Phase Lag Index (wPLI)**, yielding a **19×19 weighted adjacency matrix**.  
+- **Edges**: Functional connectivity via **Weighted Phase Lag Index (wPLI)**, yielding a **19×19 weighted adjacency matrix**.
+- **Batch-Effect Removal**: **COmBat** harmonization (see below) is applied to the extracted node features after graph construction.
+
+---
+
+#### 🔬 COmBat Harmonization — Removing Dataset Batch Effects
+
+**Why it is needed**  
+This project combines EEG recordings from three independent sources (ds004504, CAUEEG, figshare_mdd). Even after standardising sampling rate and channel layout, systematic non-biological differences remain — differences in amplifier hardware, electrode impedance tolerances, recording environment, and study protocol. These *batch effects* can cause a classifier to learn "which dataset did this come from?" instead of "which disorder does this patient have?", inflating apparent performance during development while degrading real-world generalisation.
+
+**What COmBat does**  
+COmBat (Johnson *et al.*, 2007) was originally developed for microarray gene-expression data and has since been validated for neuroimaging (Fortin *et al.*, 2017, 2018). It models each feature with a linear mixed model:
+
+```
+y_ijv = α_v + X_ij β_v + γ_iv + δ_iv ε_ijv
+```
+
+where `y_ijv` is the observed value of feature *v* for sample *j* in batch *i*; `α_v` is the overall mean; `X_ij β_v` captures the effect of biological covariates (here: diagnosis); `γ_iv` is the additive batch shift; `δ_iv` is the multiplicative batch scale; and `ε_ijv` is the residual error. Critically, COmBat uses **empirical Bayes shrinkage** to pool information across features when estimating these parameters, which makes it robust even when individual batches contain only a handful of subjects.
+
+The biological covariate (`diagnosis`) is included in the model so that variance attributable to the disorder is *protected* and not removed along with the batch effects.
+
+**Where it is applied in this pipeline**  
+COmBat is run **after** `create_graphs.py` has extracted EWT node features and stored them in PyTorch Geometric `.pt` graph files. The script:
+
+1. Loads the 10-dimensional node-feature vector (log-power + Shannon entropy for each of 5 bands) for every channel of every epoch-graph.  
+2. Stacks these into a `(n_features × n_graphs)` matrix — the format expected by neuroCombat.  
+3. Runs COmBat with `original_dataset_source` as the **batch** variable and `diagnosis` as a **protected biological covariate**.  
+4. Reshapes the corrected features and writes them back into the `.pt` files **in-place**.
+
+**References**  
+- Johnson, W.E., Li, C., Rabinovic, A. (2007). Adjusting batch effects in microarray expression data using empirical Bayes methods. *Biostatistics*, 8(1), 118–127. https://doi.org/10.1093/biostatistics/kxj037  
+- Fortin, J-P. *et al.* (2017). Harmonization of multi-site diffusion tensor imaging data. *NeuroImage*, 161, 149–170. https://doi.org/10.1016/j.neuroimage.2017.08.047  
+- neuroCombat Python package: https://github.com/Jfortin1/neuroCombat_py
+
+**Implementation**: `code/combat_harmonization.py`
 
 ---
 
@@ -185,4 +220,20 @@ python code/validate_data.py
 
 # Preprocess Harmonized Data
 python code/preprocess_data.py
+```
+
+Step C: Feature Engineering, Graph Construction & COmBat Harmonization (Phase 2)
+
+```python
+# Build graph dataset (node features via EWT + edges via wPLI)
+python code/create_graphs.py
+# Outputs:
+#   - Graph files    → data/processed/graphs/
+#   - Index file     → data/graph_metadata.csv
+
+# Apply COmBat to remove dataset-specific batch effects from node features
+python code/combat_harmonization.py
+# Outputs:
+#   - Updated graph files (features corrected in-place)
+#   - Index file          → data/combat_graph_metadata.csv
 ```
